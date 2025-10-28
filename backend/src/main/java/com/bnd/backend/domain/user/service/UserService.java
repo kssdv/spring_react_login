@@ -1,20 +1,33 @@
 package com.bnd.backend.domain.user.service;
 
-import java.nio.file.AccessDeniedException;
-
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
 import com.bnd.backend.domain.user.dto.UserRequestDTO;
+import com.bnd.backend.domain.user.entity.SocialProviderType;
 import com.bnd.backend.domain.user.entity.UserEntity;
 import com.bnd.backend.domain.user.entity.UserRoleType;
 import com.bnd.backend.domain.user.repository.UserRepository;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.client.userinfo.DefaultOAuth2UserService;
+import org.springframework.security.oauth2.client.userinfo.OAuth2UserRequest;
+import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
+import org.springframework.security.oauth2.core.user.OAuth2User;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.nio.file.AccessDeniedException;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 @Service
-public class UserService {
+public class UserService implements UserDetailsService {
 	private final PasswordEncoder passwordEncoder;
 	private final UserRepository userRepository;
 	// 생성자 방식으로 주입
@@ -49,6 +62,20 @@ public class UserService {
 	}
 	
 	// 자체 로그인
+    @Transactional(readOnly = true)
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+
+        UserEntity entity = userRepository.findByUsernameAndIsLockAndIsSocial(username, false, false)
+                .orElseThrow(() -> new UsernameNotFoundException(username));
+
+        return User.builder()
+                .username(entity.getUsername())
+                .password(entity.getPassword())
+                .roles(entity.getRoleType().name())
+                .accountLocked(entity.getIsLock())
+                .build();
+    }
 
     // 자체 로그인 회원 정보 수정
 	@Transactional
