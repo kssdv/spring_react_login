@@ -1,8 +1,13 @@
 package com.bnd.backend.config;
 
+import java.util.List;
+
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.access.hierarchicalroles.RoleHierarchy;
+import org.springframework.security.access.hierarchicalroles.RoleHierarchyImpl;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -14,9 +19,18 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.authentication.logout.LogoutFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import com.bnd.backend.domain.jwt.service.JwtService;
+import com.bnd.backend.domain.user.entity.UserRoleType;
+import com.bnd.backend.filter.JWTFilter;
 import com.bnd.backend.filter.LoginFilter;
 import com.bnd.backend.handler.LoginSuccessHandler;
+import com.bnd.backend.handler.RefreshTokenLogoutHandler;
+
 import jakarta.servlet.http.HttpServletResponse;
 
 @Configuration
@@ -25,18 +39,33 @@ public class SecurityConfig {
 
 	private final AuthenticationConfiguration authenticationConfiguration;
     private final AuthenticationSuccessHandler loginSuccessHandler;
+    private final AuthenticationSuccessHandler socialSuccessHandler;
+    private final JwtService jwtService;
 
-
-	public SecurityConfig(AuthenticationConfiguration authenticationConfiguration, 
-		@Qualifier("LoginSuccessHandler") AuthenticationSuccessHandler loginSuccessHandler) {
-	    this.authenticationConfiguration = authenticationConfiguration;
-	    this.loginSuccessHandler = loginSuccessHandler;
-	}
-	
+    public SecurityConfig(
+            AuthenticationConfiguration authenticationConfiguration,
+            @Qualifier("LoginSuccessHandler") AuthenticationSuccessHandler loginSuccessHandler,
+            @Qualifier("SocialSuccessHandler") AuthenticationSuccessHandler socialSuccessHandler,
+            JwtService jwtService
+    ) {
+        this.authenticationConfiguration = authenticationConfiguration;
+        this.loginSuccessHandler = loginSuccessHandler;
+        this.socialSuccessHandler = socialSuccessHandler;
+        this.jwtService = jwtService;
+    }
+    
     // 커스텀 자체 로그인 필터를 위한 AuthenticationManager Bean 수동 등록
     @Bean
     public AuthenticationManager authenticationManager(AuthenticationConfiguration configuration) throws Exception {
         return configuration.getAuthenticationManager();
+    }
+    
+    // 권한 계층
+    @Bean
+    public RoleHierarchy roleHierarchy() {
+        return RoleHierarchyImpl.withRolePrefix("ROLE_")
+                .role(UserRoleType.ADMIN.name()).implies(UserRoleType.USER.name())
+                .build();
     }
 	
 	// SecurityFilterChain
@@ -44,6 +73,22 @@ public class SecurityConfig {
 	public PasswordEncoder passwordEncoder() {
 		return new BCryptPasswordEncoder();
 	}
+    
+    // CORS Bean
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOrigins(List.of("http://localhost:5173"));
+        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        configuration.setAllowedHeaders(List.of("*"));
+        configuration.setAllowCredentials(true);
+        configuration.setExposedHeaders(List.of("Authorization", "Set-Cookie"));
+        configuration.setMaxAge(3600L);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+        return source;
+    }
 	
 	@Bean
 	public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -51,6 +96,12 @@ public class SecurityConfig {
 		http
 				.csrf(AbstractHttpConfigurer::disable);
 		// CORS 설정
+		http
+        		.cors(cors -> cors.configurationSource(corsConfigurationSource()));
+		// 기본 로그아웃 필터 + 커스텀 Refresh 토큰 삭제 핸들러 추가
+		http
+		        .logout(logout -> logout
+		                .addLogoutHandler(new RefreshTokenLogoutHandler(jwtService)));
 		
 		// 기본 Form 기반 인증 필터들 disable
 	    http
@@ -59,11 +110,26 @@ public class SecurityConfig {
 	    // 기본 Basic 인증 필터 disable
 	    http
 	            .httpBasic(AbstractHttpConfigurer::disable);
+	    
+	    // OAuth2 인증용
+	    http
+	        .oauth2Login(oauth2 -> oauth2
+	                .successHandler(socialSuccessHandler));
 
-	    // 인가
+//	    // 인가
+//	    http
+//	            .authorizeHttpRequests(auth -> auth
+//	                    .anyRequest().permitAll());
+	    // 인가(new)
 	    http
 	            .authorizeHttpRequests(auth -> auth
-	                    .anyRequest().permitAll());
+	                    .requestMatchers("/jwt/exchange", "/jwt/refresh").permitAll()
+	                    .requestMatchers(HttpMethod.POST, "/user/exist", "/user").permitAll()
+	                    .requestMatchers(HttpMethod.GET, "/user").hasRole(UserRoleType.USER.name())
+	                    .requestMatchers(HttpMethod.PUT, "/user").hasRole(UserRoleType.USER.name())
+	                    .requestMatchers(HttpMethod.DELETE, "/user").hasRole(UserRoleType.USER.name())
+	                    .anyRequest().authenticated()
+	            );
 	    
 	    // 예외 처리
 	    http
@@ -75,9 +141,11 @@ public class SecurityConfig {
 	                        response.sendError(HttpServletResponse.SC_FORBIDDEN); // 403 응답
 	                    })
 	            );
-	    // 커스텀 필터
+	    // 커스텀 필터 추가
 	    http
-	    .addFilterBefore(new LoginFilter(authenticationManager(authenticationConfiguration), loginSuccessHandler), UsernamePasswordAuthenticationFilter.class);
+        		.addFilterBefore(new JWTFilter(), LogoutFilter.class);
+	    http
+	    		.addFilterBefore(new LoginFilter(authenticationManager(authenticationConfiguration), loginSuccessHandler), UsernamePasswordAuthenticationFilter.class);
 	    
 	    // 세션 필터 설정 (STATELESS)
 	    http
